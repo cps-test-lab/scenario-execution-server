@@ -1,0 +1,6 @@
+import osc.types
+
+modifier remote:
+    # Execute the wrapped action on a remote scenario-execution-server.
+    hostname: string               # IP address or hostname of the server
+    port: int = 7613               # TCP port the server listens on

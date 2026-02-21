@@ -1,0 +1,3 @@
+[submodule "scenario-execution"]
+	path = scenario_execution
+	url = https://github.com/cps-test-lab/scenario-execution

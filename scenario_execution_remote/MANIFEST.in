@@ -1,0 +1,1 @@
+recursive-include scenario_execution_remote/lib_osc *.osc
