@@ -124,9 +124,9 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
 
     def initialise(self):
         """
-        Called by py_trees when transitioning from non-RUNNING to RUNNING.
-        Resolve exec-args locally (blackboard lives on client), then send
-        an 'execute' command to the server to start the action.
+        Called by py_trees on each non-RUNNING → RUNNING transition.
+        Resolves exec_args from the current blackboard state and sends
+        them to the server. init/setup are already done.
         """
         exec_args = self._resolve_exec_args()
         resp = self._send("execute", {
@@ -168,8 +168,9 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
         if self._socket is not None:
             try:
                 self._send("reset", {"action_id": self._action_id})
+                self._send("quit", {})  # ask server to exit; ignored if already gone
             except Exception as exc:  # noqa: BLE001
-                self.logger.warning(f"shutdown/reset failed: {exc}")
+                self.logger.warning(f"shutdown failed: {exc}")
             finally:
                 self._socket.close()
                 self._context.term()
@@ -182,14 +183,11 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
 
     def _resolve_exec_args(self) -> dict:
         """
-        Mirror the blackboard-resolution logic from BaseAction.initialise()
-        without calling execute() locally.  Args are shipped pre-resolved
-        to the server because the blackboard lives on the client side only.
+        Resolve execute() args from the current blackboard state.
+        Called at initialise() time when all values are guaranteed ready.
         """
         child = self.decorated
-        if child.execute_method is None:
-            return {}
-        if child._model is None:
+        if child.execute_method is None or child._model is None:
             return {}
 
         if child.resolve_variable_reference_arguments_in_execute:

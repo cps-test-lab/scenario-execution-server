@@ -36,6 +36,7 @@ import argparse
 import logging
 import signal
 import sys
+import time
 
 import zmq
 
@@ -55,12 +56,14 @@ class ScenarioExecutionServer:
     terminate as needed; this server only responds.
     """
 
-    def __init__(self, port: int):
+    def __init__(self, port: int, watchdog: int = 30):
         self.port = port
         self._runner = ActionRunner()
         self._context: zmq.Context = None
         self._socket: zmq.Socket = None
         self._running = False
+        self._watchdog = watchdog          # seconds; 0 = disabled
+        self._last_msg_time: float = None  # set on first message received
         self._log = logging.getLogger(__name__)
 
     def start(self):
@@ -94,9 +97,21 @@ class ScenarioExecutionServer:
                 if self._running:
                     self._log.error(f"ZMQ poll error: {exc}")
                 break
-            if self._socket not in events:
-                continue  # timeout — re-check _running
 
+            if self._socket not in events:
+                # Poll timeout — check watchdog
+                if (
+                    self._watchdog > 0
+                    and self._last_msg_time is not None
+                    and time.monotonic() - self._last_msg_time > self._watchdog
+                ):
+                    self._log.info(
+                        f"Watchdog: no message for {self._watchdog}s, stopping."
+                    )
+                    self._running = False
+                continue
+
+            self._last_msg_time = time.monotonic()
             data = self._socket.recv()
             try:
                 msg = protocol.decode(data)
@@ -154,6 +169,11 @@ class ScenarioExecutionServer:
                 self._runner.reset_all()
             return protocol.encode_response("ok")
 
+        elif cmd == "quit":
+            self._log.info("Client requested quit, stopping server.")
+            self._running = False
+            return protocol.encode_response("ok")
+
         else:
             return protocol.encode_response("error", message=f"Unknown command: '{cmd}'")
 
@@ -189,11 +209,18 @@ def main():
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--watchdog", "-w",
+        type=int,
+        default=10,
+        metavar="SECONDS",
+        help="Exit if no message received for this many seconds after first contact (0=disabled, default: 30)",
+    )
     args = parser.parse_args()
 
     _setup_logging(args.verbose)
 
-    server = ScenarioExecutionServer(port=args.port)
+    server = ScenarioExecutionServer(port=args.port, watchdog=args.watchdog)
 
     def _sigterm_handler(_sig, _frame):
         logging.getLogger(__name__).info("SIGTERM received, stopping…")
