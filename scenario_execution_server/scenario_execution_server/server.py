@@ -211,15 +211,29 @@ class ScenarioExecutionServer:
 
     def _cleanup(self):
         self._log.info("Cleaning up…")
-        try:
-            self._runner.reset_all()
-        except Exception as exc:  # noqa: BLE001
-            self._log.warning(f"Error during runner cleanup: {exc}")
+        # Close the ZMQ socket/context first so the server process can exit
+        # promptly (the client is already done at this point).  The potentially
+        # long-running subprocess teardown is kicked off in a daemon thread so
+        # it does not block the process from exiting.
         if self._socket is not None:
             self._socket.close()
         if self._context is not None:
             self._context.term()
-        self._log.info("Server stopped.")
+        import threading
+
+        def _reset_in_background():
+            try:
+                self._runner.reset_all()
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(f"Error during runner cleanup: {exc}")
+            self._log.info("Server stopped.")
+
+        t = threading.Thread(target=_reset_in_background, daemon=True, name="server-cleanup")
+        t.start()
+        # Give the thread a short window to finish; if it is not done the
+        # process exits anyway (daemon thread) and the OS reaps child
+        # processes via their own signal handlers.
+        t.join(timeout=0.5)
 
 
 def main():
