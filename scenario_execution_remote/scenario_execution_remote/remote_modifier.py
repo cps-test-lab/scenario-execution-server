@@ -91,6 +91,7 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
                 "action_id": self._action_id,
                 "plugin_key": self.decorated._external_plugin_key,
                 "init_args": self.decorated._external_init_args,
+                "output_dir": kwargs.get("output_dir", ""),
             })
             self._check_response(resp, "init")
 

@@ -43,7 +43,7 @@ class ActionRunner:
     # Commands
     # ------------------------------------------------------------------
 
-    def init_action(self, action_id: str, plugin_key: str, init_args: dict):
+    def init_action(self, action_id: str, plugin_key: str, init_args: dict, output_dir: str = ""):
         """
         Instantiate the action plugin with tree-build-time init_args.
         Mirrors the local client: instance is created exactly once.
@@ -58,6 +58,14 @@ class ActionRunner:
             raise TypeError(
                 f"Plugin '{plugin_key}' is not a subclass of BaseAction or BaseActionSubtree"
             )
+
+        # Set output_directory on the singleton before constructing the plugin
+        # so that plugins that read ScenarioExecutionConfig().output_directory
+        # in __init__ (e.g. MonitorResources) find the correct value.
+        if output_dir:
+            from scenario_execution.scenario_execution_base import ScenarioExecutionConfig
+            import os
+            ScenarioExecutionConfig().output_directory = os.path.abspath(output_dir)
 
         instance = behavior_cls(**init_args)
         log = logging.getLogger(f"action.{action_id[:8]}")

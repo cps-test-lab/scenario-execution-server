@@ -144,16 +144,17 @@ class ScenarioExecutionServer:
     def _dispatch(self, msg: dict) -> bytes:
         cmd = msg.get("cmd", "")
         payload = msg.get("payload", {})
-        if cmd != "heartbeat":  # always log non-heartbeat commands, but keep heartbeats quiet
+        if cmd not in  ("heartbeat", "update"):
             self._log.info(f"cmd={cmd} action_id={str(payload.get('action_id', ''))[:8]}")  # always visible
         else:
-            self._log.debug("Received heartbeat")
+            self._log.debug(f"cmd={cmd} action_id={str(payload.get('action_id', ''))[:8]}")  # only debug
 
         if cmd == "init":
             self._runner.init_action(
                 action_id=payload["action_id"],
                 plugin_key=payload["plugin_key"],
                 init_args=payload.get("init_args") or {},
+                output_dir=payload.get("output_dir", ""),
             )
             return protocol.encode_response("ok")
 
