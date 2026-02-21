@@ -91,10 +91,12 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             self._check_response(resp, "init")
 
             # Tell server to call action.setup()
+            from scenario_execution.scenario_execution_base import ScenarioExecutionConfig
             resp = self._send("setup", {
                 "action_id": self._action_id,
                 "tick_period": kwargs.get("tick_period"),
                 "output_dir": kwargs.get("output_dir", ""),
+                "scenario_file_directory": ScenarioExecutionConfig().scenario_file_directory or "",
             })
             self._check_response(resp, "setup")
         except zmq.Again:

@@ -65,7 +65,7 @@ scenario_execution (client)          scenario_execution_server
 
 Transport: ZMQ REQ/REP, serialisation: msgpack.  
 One socket per `remote()` modifier instance.  
-Connection timeout: 5 s (setup), 30 s (execution).
+Connection timeout: 5 s (setup), 10 s (execution).
 
 ## OSC2 modifier signature
 
@@ -75,3 +75,28 @@ modifier remote:
 ```
 
 Any action available as a `scenario_execution.actions` entry-point on the server can be used remotely.
+
+## Deployment notes
+
+### Cross-machine use
+Use TCP endpoints. Unix domain sockets (`/path/...`) are **local-only**.
+
+```osc
+remote("192.168.1.20")        # TCP — works across machines
+remote("/tmp/se.sock")        # IPC — same machine only
+```
+
+The server must have:
+- all required action Python packages installed (e.g. `scenario_execution_ros`)
+- any files referenced by actions (launch files, configs, …) present at the **same absolute paths** as on the client, or accessible via a network mount
+
+### Kubernetes / sidecar pattern
+Run `scenario_execution_server` as a sidecar container in the same pod and share a Unix socket via an `emptyDir` volume for zero-overhead IPC:
+
+```yaml
+volumes:
+  - name: ipc
+    emptyDir: {}
+```
+
+Both containers mount `/ipc` and connect via `remote("/ipc/se.sock")`.

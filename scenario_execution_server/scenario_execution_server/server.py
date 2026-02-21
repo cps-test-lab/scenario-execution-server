@@ -56,7 +56,7 @@ class ScenarioExecutionServer:
     terminate as needed; this server only responds.
     """
 
-    def __init__(self, port: int = 7613, socket_path: str = None, watchdog: int = 30):
+    def __init__(self, port: int = 7613, socket_path: str = None, watchdog: int = 30, connect_timeout: int = 15):
         self.port = port
         self.socket_path = socket_path
         self._runner = ActionRunner()
@@ -64,7 +64,9 @@ class ScenarioExecutionServer:
         self._socket: zmq.Socket = None
         self._running = False
         self._watchdog = watchdog
+        self._connect_timeout = connect_timeout  # seconds until first message; 0 = disabled
         self._last_msg_time: float = None
+        self._start_time: float = None
         self._log = logging.getLogger(__name__)
 
     def start(self):
@@ -77,6 +79,7 @@ class ScenarioExecutionServer:
         self._socket.bind(bind_addr)
         self._log.info(f"scenario-execution-server listening on {bind_addr}")
 
+        self._start_time = time.monotonic()
         self._running = True
         try:
             self._loop()
@@ -104,11 +107,22 @@ class ScenarioExecutionServer:
                 break
 
             if self._socket not in events:
-                # Poll timeout — check watchdog
+                now = time.monotonic()
+                # No first contact yet — check connect timeout
                 if (
+                    self._connect_timeout > 0
+                    and self._last_msg_time is None
+                    and now - self._start_time > self._connect_timeout
+                ):
+                    self._log.info(
+                        f"Connect timeout: no client connected within {self._connect_timeout}s, stopping."
+                    )
+                    self._running = False
+                # Already connected — check inactivity watchdog
+                elif (
                     self._watchdog > 0
                     and self._last_msg_time is not None
-                    and time.monotonic() - self._last_msg_time > self._watchdog
+                    and now - self._last_msg_time > self._watchdog
                 ):
                     self._log.info(
                         f"Watchdog: no message for {self._watchdog}s, stopping."
@@ -145,6 +159,7 @@ class ScenarioExecutionServer:
                 action_id=payload["action_id"],
                 tick_period=payload.get("tick_period"),
                 output_dir=payload.get("output_dir", ""),
+                scenario_file_directory=payload.get("scenario_file_directory", ""),
             )
             return protocol.encode_response("ok")
 
@@ -225,13 +240,20 @@ def main():
         type=int,
         default=10,
         metavar="SECONDS",
-        help="Exit if no message received for this many seconds after first contact (0=disabled, default: 30)",
+        help="Exit if no message received for this many seconds after first contact (0=disabled, default: 10)",
+    )
+    parser.add_argument(
+        "--connect-timeout", "-c",
+        type=int,
+        default=15,
+        metavar="SECONDS",
+        help="Exit if no client connects within this many seconds of startup (0=disabled, default: 15)",
     )
     args = parser.parse_args()
 
     _setup_logging(args.verbose)
 
-    server = ScenarioExecutionServer(port=args.port, socket_path=args.socket, watchdog=args.watchdog)
+    server = ScenarioExecutionServer(port=args.port, socket_path=args.socket, watchdog=args.watchdog, connect_timeout=args.connect_timeout)
 
     def _sigterm_handler(_sig, _frame):
         logging.getLogger(__name__).info("SIGTERM received, stopping…")

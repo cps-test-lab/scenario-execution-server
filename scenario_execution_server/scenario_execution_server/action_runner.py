@@ -66,8 +66,11 @@ class ActionRunner:
         self._actions[action_id] = instance
         _LOG.info(f"Initialized '{plugin_key}' (id={action_id[:8]})")
 
-    def setup_action(self, action_id: str, tick_period: float, output_dir: str):
+    def setup_action(self, action_id: str, tick_period: float, output_dir: str, scenario_file_directory: str = ""):
         """Call instance.setup() — mirrors the local tree walker."""
+        if scenario_file_directory:
+            from scenario_execution.scenario_execution_base import ScenarioExecutionConfig
+            ScenarioExecutionConfig().scenario_file_directory = scenario_file_directory
         instance = self._get(action_id)
         instance.setup(
             logger=instance.logger,

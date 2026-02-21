@@ -90,6 +90,7 @@ class ScenarioExecutionServerROS(ScenarioExecutionServer):
         self._node.declare_parameter("port", 7613)
         self._node.declare_parameter("socket_path", "")
         self._node.declare_parameter("watchdog", 30)
+        self._node.declare_parameter("connect_timeout", 15)
         self._node.declare_parameter("verbose", False)
 
         # ---- read CLI (non-ROS) args ----
@@ -104,6 +105,8 @@ class ScenarioExecutionServerROS(ScenarioExecutionServer):
                             help="Unix domain socket path; takes precedence over --port")
         parser.add_argument("--watchdog", "-w", type=int, default=None, metavar="SECONDS",
                             help="Watchdog timeout in seconds (0=disabled, default: 30)")
+        parser.add_argument("--connect-timeout", "-c", type=int, default=None, metavar="SECONDS",
+                            help="Exit if no client connects within N seconds of startup (0=disabled, default: 15)")
         parser.add_argument("--verbose", "-v", action="store_true", default=False,
                             help="Enable debug logging")
         cli, _ = parser.parse_known_args(args_without_ros)
@@ -120,15 +123,16 @@ class ScenarioExecutionServerROS(ScenarioExecutionServer):
         port = _ros_param("port", cli.port, 7613)
         socket_path = _ros_param("socket_path", cli.socket, "") or None
         watchdog = _ros_param("watchdog", cli.watchdog, 30)
+        connect_timeout = _ros_param("connect_timeout", cli.connect_timeout, 15)
         verbose = self._node.get_parameter("verbose").value or cli.verbose
 
         _install_rclpy_logging(verbose)
         self._node.get_logger().info(
             f"scenario-execution-server-ros starting "
-            f"(port={port}, socket_path={socket_path!r}, watchdog={watchdog}s)"
+            f"(port={port}, socket_path={socket_path!r}, watchdog={watchdog}s, connect_timeout={connect_timeout}s)"
         )
 
-        super().__init__(port=port, socket_path=socket_path, watchdog=watchdog)
+        super().__init__(port=port, socket_path=socket_path, watchdog=watchdog, connect_timeout=connect_timeout)
 
     def start(self):
         """Start ROS executor in background, then run the ZMQ loop in main thread."""
