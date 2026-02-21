@@ -144,7 +144,10 @@ class ScenarioExecutionServer:
     def _dispatch(self, msg: dict) -> bytes:
         cmd = msg.get("cmd", "")
         payload = msg.get("payload", {})
-        self._log.info(f"cmd={cmd} action_id={str(payload.get('action_id', ''))[:8]}")  # always visible
+        if cmd != "heartbeat":  # always log non-heartbeat commands, but keep heartbeats quiet
+            self._log.info(f"cmd={cmd} action_id={str(payload.get('action_id', ''))[:8]}")  # always visible
+        else:
+            self._log.debug("Received heartbeat")
 
         if cmd == "init":
             self._runner.init_action(
@@ -187,6 +190,10 @@ class ScenarioExecutionServer:
                 self._runner.reset_action(action_id)
             else:
                 self._runner.reset_all()
+            return protocol.encode_response("ok")
+
+        elif cmd == "heartbeat":
+            # Just refresh the watchdog timer (already done by _loop); reply ok.
             return protocol.encode_response("ok")
 
         elif cmd == "quit":

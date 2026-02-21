@@ -32,6 +32,7 @@ Design notes
 * The server is fully passive (REP). One REQ/REP cycle per command.
 """
 
+import threading
 import uuid
 import py_trees
 import zmq
@@ -59,6 +60,9 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
         self._action_id = str(uuid.uuid4())
         self._context: zmq.Context = None
         self._socket: zmq.Socket = None
+        self._socket_lock = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread = None
 
     # ------------------------------------------------------------------
     # py_trees setup — called once by the tree walker
@@ -118,6 +122,13 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             f"Connected to scenario-execution-server at {self._zmq_endpoint} OK"
         )
 
+        # Start background heartbeat thread (1 Hz) to keep the server watchdog alive
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True, name="remote-heartbeat"
+        )
+        self._heartbeat_thread.start()
+
     # ------------------------------------------------------------------
     # py_trees tick lifecycle
     # ------------------------------------------------------------------
@@ -165,6 +176,12 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
 
     def shutdown(self):
         """Called on scenario shutdown. Clean up server state and socket."""
+        # Stop heartbeat thread first so it no longer touches the socket
+        if self._heartbeat_thread is not None:
+            self._heartbeat_stop.set()
+            self._heartbeat_thread.join(timeout=2.0)
+            self._heartbeat_thread = None
+
         if self._socket is not None:
             try:
                 self._send("reset", {"action_id": self._action_id})
@@ -209,9 +226,23 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
 
         return args
 
+    def _heartbeat_loop(self):
+        """Background thread: sends a heartbeat every second while connected."""
+        while not self._heartbeat_stop.wait(timeout=1.0):
+            if self._socket is None:
+                break
+            try:
+                with self._socket_lock:
+                    if self._socket is not None:
+                        self._socket.send(protocol.encode("heartbeat", {}))
+                        self._socket.recv()  # consume the 'ok' reply
+            except Exception:  # noqa: BLE001  — socket closing during shutdown is normal
+                break
+
     def _send(self, cmd: str, payload: dict) -> dict:
-        self._socket.send(protocol.encode(cmd, payload))
-        return protocol.decode_response(self._socket.recv())
+        with self._socket_lock:
+            self._socket.send(protocol.encode(cmd, payload))
+            return protocol.decode_response(self._socket.recv())
 
     @staticmethod
     def _check_response(resp: dict, cmd: str):
