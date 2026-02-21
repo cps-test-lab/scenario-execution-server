@@ -51,12 +51,11 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
     # per-command timeout during execution (generous, actions may take time)
     _EXEC_TIMEOUT_MS = 30_000
 
-    def __init__(self, child: py_trees.behaviour.Behaviour, hostname: str, port: int):
-        super().__init__(name=f"remote({hostname}:{port})")
+    def __init__(self, child: py_trees.behaviour.Behaviour, endpoint: str):
+        self._zmq_endpoint = _make_zmq_endpoint(endpoint)
+        super().__init__(name=f"remote({self._zmq_endpoint})")
         # keep child for metadata only — NOT in self.children
         self.decorated = child
-        self.hostname = hostname
-        self.port = int(port)
         self._action_id = str(uuid.uuid4())
         self._context: zmq.Context = None
         self._socket: zmq.Socket = None
@@ -75,12 +74,12 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
 
         self.logger.info(
             f"Connecting to scenario-execution-server at "
-            f"tcp://{self.hostname}:{self.port} "
+            f"{self._zmq_endpoint} "
             f"(plugin='{self.decorated._external_plugin_key}', "
             f"action_id={self._action_id[:8]}, "
             f"timeout={self._SETUP_TIMEOUT_MS}ms) ..."
         )
-        self._socket.connect(f"tcp://{self.hostname}:{self.port}")
+        self._socket.connect(self._zmq_endpoint)
 
         try:
             # Tell server to instantiate the action plugin
@@ -106,7 +105,7 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             self._context = None
             raise RuntimeError(
                 f"Cannot reach scenario-execution-server at "
-                f"tcp://{self.hostname}:{self.port} "
+                f"{self._zmq_endpoint} "
                 f"(timeout {self._SETUP_TIMEOUT_MS}ms). Is the server running?"
             )
 
@@ -114,8 +113,7 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
         self._socket.setsockopt(zmq.SNDTIMEO, self._EXEC_TIMEOUT_MS)
         self._socket.setsockopt(zmq.RCVTIMEO, self._EXEC_TIMEOUT_MS)
         self.logger.info(
-            f"Connected to scenario-execution-server at "
-            f"tcp://{self.hostname}:{self.port} OK"
+            f"Connected to scenario-execution-server at {self._zmq_endpoint} OK"
         )
 
     # ------------------------------------------------------------------
@@ -221,15 +219,29 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             )
 
 
+def _make_zmq_endpoint(endpoint: str) -> str:
+    """Convert a user-supplied endpoint string to a ZMQ address.
+
+    Rules:
+      /path/...  or  ./path/...  →  ipc:///path/...  (Unix domain socket)
+      host                       →  tcp://host:7613
+      host:port                  →  tcp://host:port
+    """
+    if endpoint.startswith('ipc://') or endpoint.startswith('tcp://'):
+        return endpoint  # already a full ZMQ endpoint
+    if endpoint.startswith('/') or endpoint.startswith('./'):
+        return f"ipc://{endpoint}"
+    if ':' in endpoint:
+        return f"tcp://{endpoint}"
+    return f"tcp://{endpoint}:7613"
+
+
 def create_remote_modifier(child: py_trees.behaviour.Behaviour, args: dict) -> RemoteModifier:
     """
     Entry-point factory called by model_to_py_tree when the 'remote'
     modifier plugin is resolved.
 
     args keys match the OSC2 modifier declaration:
-      hostname: string
-      port:     int  (default 4242)
+      endpoint: string  — hostname/IP[:port] or /path/to/unix-socket
     """
-    hostname = args.get("hostname", "127.0.0.1")
-    port = int(args.get("port", 4242))
-    return RemoteModifier(child=child, hostname=hostname, port=port)
+    return RemoteModifier(child=child, endpoint=args.get("endpoint", "127.0.0.1"))

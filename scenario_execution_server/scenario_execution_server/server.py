@@ -56,21 +56,26 @@ class ScenarioExecutionServer:
     terminate as needed; this server only responds.
     """
 
-    def __init__(self, port: int, watchdog: int = 30):
+    def __init__(self, port: int = 7613, socket_path: str = None, watchdog: int = 30):
         self.port = port
+        self.socket_path = socket_path
         self._runner = ActionRunner()
         self._context: zmq.Context = None
         self._socket: zmq.Socket = None
         self._running = False
-        self._watchdog = watchdog          # seconds; 0 = disabled
-        self._last_msg_time: float = None  # set on first message received
+        self._watchdog = watchdog
+        self._last_msg_time: float = None
         self._log = logging.getLogger(__name__)
 
     def start(self):
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.REP)
-        self._socket.bind(f"tcp://*:{self.port}")
-        self._log.info(f"scenario-execution-server listening on tcp://*:{self.port}")
+        if self.socket_path:
+            bind_addr = f"ipc://{self.socket_path}"
+        else:
+            bind_addr = f"tcp://*:{self.port}"
+        self._socket.bind(bind_addr)
+        self._log.info(f"scenario-execution-server listening on {bind_addr}")
 
         self._running = True
         try:
@@ -202,7 +207,13 @@ def main():
         "--port", "-p",
         type=int,
         default=7613,
-        help="TCP port to listen on (default: 7613)",
+        help="TCP port to listen on (default: 7613); ignored when --socket is used",
+    )
+    parser.add_argument(
+        "--socket", "-s",
+        default=None,
+        metavar="PATH",
+        help="Unix domain socket path (e.g. /tmp/se.sock); takes precedence over --port",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -220,7 +231,7 @@ def main():
 
     _setup_logging(args.verbose)
 
-    server = ScenarioExecutionServer(port=args.port, watchdog=args.watchdog)
+    server = ScenarioExecutionServer(port=args.port, socket_path=args.socket, watchdog=args.watchdog)
 
     def _sigterm_handler(_sig, _frame):
         logging.getLogger(__name__).info("SIGTERM received, stopping…")

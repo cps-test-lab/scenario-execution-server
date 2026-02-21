@@ -2,5 +2,8 @@ import osc.types
 
 modifier remote:
     # Execute the wrapped action on a remote scenario-execution-server.
-    hostname: string               # IP address or hostname of the server
-    port: int = 7613               # TCP port the server listens on
+    # endpoint examples:
+    #   "192.168.1.10"       TCP, default port 7613
+    #   "192.168.1.10:9000"  TCP, explicit port
+    #   "/tmp/se.sock"       Unix domain socket
+    endpoint: string
