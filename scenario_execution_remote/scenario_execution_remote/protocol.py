@@ -24,6 +24,8 @@ Commands (client → server):
   update    payload: { action_id }
   terminate payload: { action_id, new_status }
   reset     payload: {}
+  heartbeat payload: {}   — sent every 1 s; resets server watchdog; client
+                            checks ack within heartbeat_failure_timeout seconds
 """
 
 import msgpack

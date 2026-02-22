@@ -7,3 +7,7 @@ modifier remote:
     #   "192.168.1.10:9000"  TCP, explicit port
     #   "/tmp/se.sock"       Unix domain socket
     endpoint: string
+    # Seconds without a heartbeat acknowledgement before update() returns FAILURE.
+    # The client sends a heartbeat every 1 s; the server watchdog mirrors this
+    # and exits after --watchdog seconds (default 3) of silence.
+    heartbeat_failure_timeout: float = 3.0

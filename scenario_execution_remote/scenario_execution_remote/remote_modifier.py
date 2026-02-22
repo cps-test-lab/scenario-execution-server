@@ -14,17 +14,15 @@ scenario-execution-server instance via ZMQ REQ/REP + msgpack.
 
 Design notes
 ------------
-* Extends py_trees.behaviour.Behaviour (NOT Decorator).
-  py_trees.decorators.Decorator.tick() always ticks the child locally AND
-  then calls self.update() — that would cause dual local+remote execution.
-  As a plain Behaviour, we are a leaf node: only our own lifecycle methods
-  run during a tick cycle; the child action is NEVER put in self.children.
+* Extends py_trees.behaviour.Behaviour as a plain leaf node.
+  The child action is NEVER ticked locally; only the RemoteModifier lifecycle
+  methods run during a tick cycle.
 
 * The child action is stored as self.decorated purely for metadata:
     - child._external_plugin_key  : which action plugin the server must load
     - child._external_init_args   : init-time args (already resolved)
-    - child._model              : OSC2 model for live blackboard resolution
-    - child.execute_skip_args   : args consumed by __init__ (skip in execute)
+    - child._model                : OSC2 model for live blackboard resolution
+    - child.execute_skip_args     : args consumed by __init__ (skip in execute)
 
 * Each RemoteModifier instance owns its own zmq.Context + REQ socket so
   that parallel remote actions do not share state or contend on a socket.
@@ -33,7 +31,9 @@ Design notes
 """
 
 import threading
+import time
 import uuid
+import copy
 import py_trees
 import zmq
 
@@ -51,13 +51,25 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
     _SETUP_TIMEOUT_MS = 5_000
     # per-command timeout during execution (generous, actions may take time)
     _EXEC_TIMEOUT_MS = 30_000
+    # heartbeat is sent every second from the client to the server
+    _HEARTBEAT_INTERVAL_S = 1.0
+    # how long to wait for the server's heartbeat ack before considering it missing
+    _HEARTBEAT_ACK_TIMEOUT_MS = 2_000
 
-    def __init__(self, child: py_trees.behaviour.Behaviour, endpoint: str):
+    def __init__(self, child: py_trees.behaviour.Behaviour, endpoint: str,
+                 heartbeat_failure_timeout: float = 5.0):
         self._zmq_endpoint = _make_zmq_endpoint(endpoint)
         super().__init__(name=f"remote({self._zmq_endpoint})")
         # keep child for metadata only — NOT in self.children
         self.decorated = child
+        self.logger = copy.copy(child.logger)
+        self.logger.name = f"remote({self._zmq_endpoint})"
         self._action_id = str(uuid.uuid4())
+        # If no successful heartbeat ack is received for this many seconds,
+        # update() returns FAILURE (server presumed dead).
+        self._heartbeat_failure_timeout = heartbeat_failure_timeout
+        self._last_heartbeat_ok_time: float = None
+        self._server_dead: bool = False
         self._context: zmq.Context = None
         self._socket: zmq.Socket = None
         self._socket_lock = threading.Lock()
@@ -72,6 +84,9 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.REQ)
         self._socket.setsockopt(zmq.LINGER, 0)          # never block on close/term
+        # Allow sending a new request even if a previous recv() timed out;
+        # this keeps the heartbeat loop working after a transient ack timeout.
+        self._socket.setsockopt(zmq.REQ_RELAXED, 1)
         # Fail fast if the server is unreachable during setup
         self._socket.setsockopt(zmq.SNDTIMEO, self._SETUP_TIMEOUT_MS)
         self._socket.setsockopt(zmq.RCVTIMEO, self._SETUP_TIMEOUT_MS)
@@ -105,7 +120,6 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             })
             self._check_response(resp, "setup")
         except zmq.Again:
-            self._socket.setsockopt(zmq.LINGER, 0)  # discard pending messages immediately
             self._socket.close()
             self._context.term()
             self._socket = None
@@ -123,7 +137,12 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             f"Connected to scenario-execution-server at {self._zmq_endpoint} OK"
         )
 
-        # Start background heartbeat thread (1 Hz) to keep the server watchdog alive
+        # Initialise heartbeat timestamp so update() doesn't fail before the
+        # first heartbeat has been sent.
+        self._last_heartbeat_ok_time = time.monotonic()
+        # Start background heartbeat thread (1 Hz) to keep the server watchdog alive.
+        # The heartbeat also serves as the liveness probe: if the server stops
+        # acknowledging, update() will return FAILURE after heartbeat_failure_timeout.
         self._heartbeat_stop.clear()
         self._heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop, daemon=True, name="remote-heartbeat"
@@ -135,11 +154,8 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
     # ------------------------------------------------------------------
 
     def initialise(self):
-        """
-        Called by py_trees on each non-RUNNING → RUNNING transition.
-        Resolves exec_args from the current blackboard state and sends
-        them to the server. init/setup are already done.
-        """
+        """Called on each non-RUNNING → RUNNING transition. Resolves exec args
+        from the child's blackboard state and forwards them to the server."""
         exec_args = self._resolve_exec_args()
         resp = self._send("execute", {
             "action_id": self._action_id,
@@ -149,10 +165,29 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
 
     def update(self) -> py_trees.common.Status:
         """Called every tick while RUNNING. Poll the server for action status."""
+        # Heartbeat liveness check: if the server has not acked a heartbeat
+        # recently, treat it as gone and return FAILURE immediately.
+        if (self._last_heartbeat_ok_time is not None
+                and time.monotonic() - self._last_heartbeat_ok_time
+                > self._heartbeat_failure_timeout):
+            self.logger.error(
+                f"No heartbeat ack from server for >"
+                f"{self._heartbeat_failure_timeout:.0f}s — server presumed dead, "
+                f"returning FAILURE"
+            )
+            self._server_dead = True
+            return py_trees.common.Status.FAILURE
         try:
-            resp = self._send("update", {"action_id": self._action_id})
+            # Use heartbeat_failure_timeout as the recv timeout for the update
+            # command. The server should respond immediately (it just polls the
+            # action status), so waiting the full _EXEC_TIMEOUT_MS (30 s) would
+            # delay failure detection by nearly 30 s when the server disappears.
+            update_timeout_ms = int(self._heartbeat_failure_timeout * 1000)
+            resp = self._send("update", {"action_id": self._action_id},
+                              rcvtimeo=update_timeout_ms)
         except zmq.Again:
             self.logger.error(f"update timed out (server unreachable?) — returning FAILURE")
+            self._server_dead = True
             return py_trees.common.Status.FAILURE
         if resp.get("status") == "error":
             self.logger.error(f"update error: {resp.get('message')}")
@@ -166,7 +201,7 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
 
     def terminate(self, new_status: py_trees.common.Status):
         """Called when the behaviour stops being ticked."""
-        if self._socket is not None:
+        if self._socket is not None and not self._server_dead:
             try:
                 self._send("terminate", {
                     "action_id": self._action_id,
@@ -184,66 +219,87 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             self._heartbeat_thread = None
 
         if self._socket is not None:
-            try:
-                self._send("reset", {"action_id": self._action_id})
-                self._send("quit", {})  # ask server to exit; ignored if already gone
-            except Exception as exc:  # noqa: BLE001
-                self.logger.warning(f"shutdown failed: {exc}")
-            finally:
-                self._socket.close()
-                self._context.term()
-                self._socket = None
-                self._context = None
+            if not self._server_dead:
+                try:
+                    self._send("reset", {"action_id": self._action_id})
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning(f"shutdown failed: {exc}")
+            self._socket.close()
+            self._context.term()
+            self._socket = None
+            self._context = None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _resolve_exec_args(self) -> dict:
-        """
-        Resolve execute() args from the current blackboard state.
-        Called at initialise() time when all values are guaranteed ready.
-        """
+        """Resolve execute() args from the child's current blackboard state."""
         child = self.decorated
         if child.execute_method is None or child._model is None:
             return {}
 
+        blackboard = child.get_blackboard_client()
         if child.resolve_variable_reference_arguments_in_execute:
-            args = child._model.get_resolved_value(
-                child.get_blackboard_client(),
-                skip_keys=child.execute_skip_args,
-            )
+            args = child._model.get_resolved_value(blackboard, skip_keys=child.execute_skip_args)
         else:
             args = child._model.get_resolved_value_with_variable_references(
-                child.get_blackboard_client(),
-                skip_keys=child.execute_skip_args,
-            )
+                blackboard, skip_keys=child.execute_skip_args)
 
         if child._model.actor:
-            args["associated_actor"] = child._model.actor.get_resolved_value(
-                child.get_blackboard_client()
-            )
+            args["associated_actor"] = child._model.actor.get_resolved_value(blackboard)
             args["associated_actor"]["name"] = child._model.actor.name
 
         return args
 
     def _heartbeat_loop(self):
-        """Background thread: sends a heartbeat every second while connected."""
-        while not self._heartbeat_stop.wait(timeout=1.0):
+        """Background thread: sends a heartbeat every second while connected.
+
+        Uses a short per-heartbeat receive timeout (_HEARTBEAT_ACK_TIMEOUT_MS)
+        so that a dead server is detected within that window rather than waiting
+        the full _EXEC_TIMEOUT_MS (30 s).  The socket is opened with REQ_RELAXED,
+        which allows the next send() to proceed even after a recv() timeout.
+
+        _last_heartbeat_ok_time is updated only when the server acknowledges.
+        update() monitors this timestamp and returns FAILURE when it goes stale.
+        """
+        while not self._heartbeat_stop.wait(timeout=self._HEARTBEAT_INTERVAL_S):
             if self._socket is None:
                 break
             try:
                 with self._socket_lock:
-                    if self._socket is not None:
+                    if self._socket is None:
+                        break
+                    # Temporarily lower the recv timeout so we detect a missing
+                    # server quickly instead of waiting _EXEC_TIMEOUT_MS.
+                    self._socket.setsockopt(zmq.RCVTIMEO, self._HEARTBEAT_ACK_TIMEOUT_MS)
+                    try:
                         self._socket.send(protocol.encode("heartbeat", {}))
                         self._socket.recv()  # consume the 'ok' reply
+                        self._last_heartbeat_ok_time = time.monotonic()
+                    except zmq.Again:
+                        # Server did not ack within HEARTBEAT_ACK_TIMEOUT_MS.
+                        # REQ_RELAXED lets us retry on the next iteration.
+                        self.logger.warning(
+                            f"Heartbeat ack timeout ({self._HEARTBEAT_ACK_TIMEOUT_MS} ms) "
+                            f"— server may be gone"
+                        )
+                    finally:
+                        # Restore the normal execution timeout.
+                        self._socket.setsockopt(zmq.RCVTIMEO, self._EXEC_TIMEOUT_MS)
             except Exception:  # noqa: BLE001  — socket closing during shutdown is normal
                 break
 
-    def _send(self, cmd: str, payload: dict) -> dict:
+    def _send(self, cmd: str, payload: dict, rcvtimeo: int = None) -> dict:
         with self._socket_lock:
-            self._socket.send(protocol.encode(cmd, payload))
-            return protocol.decode_response(self._socket.recv())
+            if rcvtimeo is not None:
+                self._socket.setsockopt(zmq.RCVTIMEO, rcvtimeo)
+            try:
+                self._socket.send(protocol.encode(cmd, payload))
+                return protocol.decode_response(self._socket.recv())
+            finally:
+                if rcvtimeo is not None:
+                    self._socket.setsockopt(zmq.RCVTIMEO, self._EXEC_TIMEOUT_MS)
 
     @staticmethod
     def _check_response(resp: dict, cmd: str):
@@ -276,6 +332,12 @@ def create_remote_modifier(child: py_trees.behaviour.Behaviour, args: dict) -> R
     modifier plugin is resolved.
 
     args keys match the OSC2 modifier declaration:
-      endpoint: string  — hostname/IP[:port] or /path/to/unix-socket
+      endpoint: string               — hostname/IP[:port] or /path/to/unix-socket
+      heartbeat_failure_timeout: float — seconds without a heartbeat ack before
+                                         update() returns FAILURE (default: 3.0)
     """
-    return RemoteModifier(child=child, endpoint=args.get("endpoint", "127.0.0.1"))
+    return RemoteModifier(
+        child=child,
+        endpoint=args.get("endpoint", "127.0.0.1"),
+        heartbeat_failure_timeout=float(args.get("heartbeat_failure_timeout", 3.0)),
+    )

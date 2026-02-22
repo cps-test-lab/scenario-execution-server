@@ -21,6 +21,18 @@ Architecture
   socket (one connection per remote action), but they all talk to the
   same REP socket sequentially (ZMQ serialises them at the socket level).
 
+Liveness / watchdog
+-------------------
+* The remote-modifier (client side) sends a `heartbeat` command every 1 s.
+* The server tracks _last_msg_time (reset on ANY incoming message, including
+  heartbeats and regular commands).
+* If no message is received within --watchdog seconds (default: 3) the
+  server exits.  This handles the case where the scenario-execution
+  container disappears.
+* connect_timeout handles the symmetric case: if no client ever connects
+  within --connect-timeout seconds the server exits rather than waiting
+  forever.
+
 Supported commands
 ------------------
   init      { action_id, plugin_key, init_args }
@@ -30,6 +42,7 @@ Supported commands
   terminate { action_id, new_status }
   reset     { action_id }  — terminates+shutdowns a single action
   reset_all {}             — terminates+shutdowns all actions
+  heartbeat {}             — keepalive; resets watchdog timer
 """
 
 import argparse
@@ -56,7 +69,7 @@ class ScenarioExecutionServer:
     terminate as needed; this server only responds.
     """
 
-    def __init__(self, port: int = 7613, socket_path: str = None, watchdog: int = 30, connect_timeout: int = 15):
+    def __init__(self, port: int = 7613, socket_path: str = None, watchdog: int = 3, connect_timeout: int = 15):
         self.port = port
         self.socket_path = socket_path
         self._runner = ActionRunner()
@@ -197,11 +210,6 @@ class ScenarioExecutionServer:
             # Just refresh the watchdog timer (already done by _loop); reply ok.
             return protocol.encode_response("ok")
 
-        elif cmd == "quit":
-            self._log.info("Client requested quit, stopping server.")
-            self._running = False
-            return protocol.encode_response("ok")
-
         else:
             return protocol.encode_response("error", message=f"Unknown command: '{cmd}'")
 
@@ -260,9 +268,14 @@ def main():
     parser.add_argument(
         "--watchdog", "-w",
         type=int,
-        default=10,
+        default=3,
         metavar="SECONDS",
-        help="Exit if no message received for this many seconds after first contact (0=disabled, default: 10)",
+        help=(
+            "Exit if no message (heartbeat or command) is received for this many seconds "
+            "after the first client contact. The remote-modifier sends a heartbeat every "
+            "1 s, so this effectively detects a disappeared client within SECONDS. "
+            "(0=disabled, default: 3)"
+        ),
     )
     parser.add_argument(
         "--connect-timeout", "-c",
