@@ -10,4 +10,7 @@ modifier remote:
     # Seconds without a heartbeat acknowledgement before update() returns FAILURE.
     # The client sends a heartbeat every 1 s; the server watchdog mirrors this
     # and exits after --watchdog seconds (default 3) of silence.
-    heartbeat_failure_timeout: float = 3.0
+    heartbeat_failure_timeout: time = 3.0s
+    # Timeout in milliseconds for connecting and initialising the remote action
+    # (init + setup). Fail fast if the server is unreachable.
+    setup_timeout: time = 10.0s

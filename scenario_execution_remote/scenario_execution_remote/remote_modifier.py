@@ -47,8 +47,6 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
     The *child* action node is used only for metadata — it is never ticked.
     """
 
-    # connection timeout for setup (fail fast if server not reachable)
-    _SETUP_TIMEOUT_MS = 5_000
     # per-command timeout during execution (generous, actions may take time)
     _EXEC_TIMEOUT_MS = 30_000
     # heartbeat is sent every second from the client to the server
@@ -57,8 +55,9 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
     _HEARTBEAT_ACK_TIMEOUT_MS = 2_000
 
     def __init__(self, child: py_trees.behaviour.Behaviour, endpoint: str,
-                 heartbeat_failure_timeout: float = 5.0):
+                 heartbeat_failure_timeout: float = 5.0, setup_timeout: float = 5.0):
         self._zmq_endpoint = _make_zmq_endpoint(endpoint)
+        self._setup_timeout = setup_timeout
         super().__init__(name=f"remote({self._zmq_endpoint})")
         # keep child for metadata only — NOT in self.children
         self.decorated = child
@@ -88,15 +87,15 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
         # this keeps the heartbeat loop working after a transient ack timeout.
         self._socket.setsockopt(zmq.REQ_RELAXED, 1)
         # Fail fast if the server is unreachable during setup
-        self._socket.setsockopt(zmq.SNDTIMEO, self._SETUP_TIMEOUT_MS)
-        self._socket.setsockopt(zmq.RCVTIMEO, self._SETUP_TIMEOUT_MS)
+        self._socket.setsockopt(zmq.SNDTIMEO, int(self._setup_timeout * 1000))
+        self._socket.setsockopt(zmq.RCVTIMEO, int(self._setup_timeout * 1000))
 
         self.logger.info(
             f"Connecting to scenario-execution-server at "
             f"{self._zmq_endpoint} "
             f"(plugin='{self.decorated._external_plugin_key}', "
             f"action_id={self._action_id[:8]}, "
-            f"timeout={self._SETUP_TIMEOUT_MS}ms) ..."
+            f"timeout={self._setup_timeout}s) ..."
         )
         self._socket.connect(self._zmq_endpoint)
 
@@ -127,7 +126,7 @@ class RemoteModifier(py_trees.behaviour.Behaviour):
             raise RuntimeError(
                 f"Cannot reach scenario-execution-server at "
                 f"{self._zmq_endpoint} "
-                f"(timeout {self._SETUP_TIMEOUT_MS}ms). Is the server running?"
+                f"(timeout {self._setup_timeout}s). Is the server running?"
             )
 
         # Switch to a longer timeout for the actual execution commands
@@ -335,9 +334,11 @@ def create_remote_modifier(child: py_trees.behaviour.Behaviour, args: dict) -> R
       endpoint: string               — hostname/IP[:port] or /path/to/unix-socket
       heartbeat_failure_timeout: float — seconds without a heartbeat ack before
                                          update() returns FAILURE (default: 3.0)
+      setup_timeout: float          — timeout in seconds for connect + init + setup (default: 10.0)
     """
     return RemoteModifier(
         child=child,
         endpoint=args.get("endpoint", "127.0.0.1"),
         heartbeat_failure_timeout=float(args.get("heartbeat_failure_timeout", 3.0)),
+        setup_timeout=float(args.get("setup_timeout", 10.0)),
     )
